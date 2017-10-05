@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 // A Dynamic, Loose Octree for storing any objects that can be described with AABB bounds
@@ -21,7 +22,8 @@ using UnityEngine;
 // Note: For loops are often used here since in some cases (e.g. the IsColliding method)
 // they actually give much better performance than using Foreach, even in the compiled build.
 // Using a LINQ expression is worse again than Foreach.
-public class BoundsOctree<T> {
+public class BoundsOctree<T>
+{
 	// The total amount of objects currently in the tree
 	public int Count { get; private set; }
 	
@@ -41,6 +43,12 @@ public class BoundsOctree<T> {
 	readonly Queue<Ray> lastRayCollisionChecks = new Queue<Ray>();
 	#endif
 
+    event Action<BoundsOctreeNode<T>> nodeCreated;
+    event Action<BoundsOctreeNode<T>> nodeDestroyed;
+    event Action<BoundsOctreeNode<T>, BoundsOctreeNode<T>[], BoundsOctreeNode<T>[]> childrenChanging;
+    event Action<BoundsOctreeNode<T>, T> objectAdded;
+    event Action<BoundsOctreeNode<T>, T> objectRemoved;
+
 	/// <summary>
 	/// Constructor for the bounds octree.
 	/// </summary>
@@ -48,8 +56,15 @@ public class BoundsOctree<T> {
 	/// <param name="initialWorldPos">Position of the centre of the initial node.</param>
 	/// <param name="minNodeSize">Nodes will stop splitting if the new nodes would be smaller than this (metres).</param>
 	/// <param name="loosenessVal">Clamped between 1 and 2. Values > 1 let nodes overlap.</param>
-	public BoundsOctree(float initialWorldSize, Vector3 initialWorldPos, float minNodeSize, float loosenessVal) {
-		if (minNodeSize > initialWorldSize) {
+	/// <param name="nodeCreatedCallback">[optional] Event raised when nodes are created (passed on to children, too).</param>
+	/// <param name="childrenChangingCallback">[optional] Event raised when children nodes are being changed.</param>
+	/// <param name="objectAdded">[optional] Event raised when objects are added to this node.</param>
+	/// <param name="objectRemoved">[optional] Event raised when objects are removed from this node.</param>
+	public BoundsOctree(float initialWorldSize, Vector3 initialWorldPos, float minNodeSize, float loosenessVal,
+	    Action<BoundsOctreeNode<T>> nodeCreatedCallback = null, Action<BoundsOctreeNode<T>> nodeDestroyedCallback = null,
+        Action<BoundsOctreeNode<T>, BoundsOctreeNode<T>[], BoundsOctreeNode<T>[]> childrenChangingCallback = null,
+	    Action<BoundsOctreeNode<T>, T> objectAddedCallback = null, Action<BoundsOctreeNode<T>, T> objectRemovedCallback = null) {
+        if (minNodeSize > initialWorldSize) {
 			Debug.LogWarning("Minimum node size must be at least as big as the initial world size. Was: " + minNodeSize + " Adjusted to: " + initialWorldSize);
 			minNodeSize = initialWorldSize;
 		}
@@ -57,7 +72,14 @@ public class BoundsOctree<T> {
 		initialSize = initialWorldSize;
 		minSize = minNodeSize;
 		looseness = Mathf.Clamp(loosenessVal, 1.0f, 2.0f);
-		rootNode = new BoundsOctreeNode<T>(initialSize, minSize, loosenessVal, initialWorldPos);
+
+        nodeCreated = nodeCreatedCallback;
+	    nodeDestroyed = nodeDestroyedCallback;
+	    childrenChanging = childrenChangingCallback;
+	    objectAdded = objectAddedCallback;
+	    objectRemoved = objectRemovedCallback;
+
+		rootNode = new BoundsOctreeNode<T>(initialSize, minSize, loosenessVal, initialWorldPos, nodeCreated, childrenChanging, objectAdded, objectRemoved);
 	}
 
 	// #### PUBLIC METHODS ####
@@ -242,7 +264,7 @@ public class BoundsOctree<T> {
 		Vector3 newCenter = rootNode.Center + new Vector3(xDirection * half, yDirection * half, zDirection * half);
 
 		// Create a new, bigger octree root node
-		rootNode = new BoundsOctreeNode<T>(newLength, minSize, looseness, newCenter);
+		rootNode = new BoundsOctreeNode<T>(newLength, minSize, looseness, newCenter, nodeCreated, childrenChanging, objectAdded, objectRemoved);
 
 		if (oldRoot.HasAnyObjects())
 		{
@@ -260,20 +282,29 @@ public class BoundsOctree<T> {
 					xDirection = i % 2 == 0 ? -1 : 1;
 					yDirection = i > 3 ? -1 : 1;
 					zDirection = (i < 2 || (i > 3 && i < 6)) ? -1 : 1;
-					children[i] = new BoundsOctreeNode<T>(rootNode.BaseLength, minSize, looseness, newCenter + new Vector3(xDirection * half, yDirection * half, zDirection * half));
+					children[i] = new BoundsOctreeNode<T>(rootNode.BaseLength, minSize, looseness, newCenter + new Vector3(xDirection * half, yDirection * half, zDirection * half), 
+                        nodeCreated, childrenChanging, objectAdded, objectRemoved);
 				}
 			}
 
 			// Attach the new children to the new root node
 			rootNode.SetChildren(children);
 		}
+        else if (nodeDestroyed != null)
+	    {
+	        nodeDestroyed(oldRoot);
+	    }
 	}
 
 	/// <summary>
 	/// Shrink the octree if possible, else leave it the same.
 	/// </summary>
-	void Shrink() {
+	void Shrink()
+	{
+	    var oldRoot = rootNode;
 		rootNode = rootNode.ShrinkIfPossible(initialSize);
+	    if (oldRoot != rootNode && nodeDestroyed != null)
+            nodeDestroyed(oldRoot);
 	}
 
 	/// <summary>

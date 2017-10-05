@@ -1,9 +1,11 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 // A node in a BoundsOctree
 // Copyright 2014 Nition, BSD licence (see LICENCE file). http://nition.co
-public class BoundsOctreeNode<T> {
+public class BoundsOctreeNode<T>
+{
 	// Centre of this node
 	public Vector3 Center { get; private set; }
 	// Length of this node if it has a looseness of 1.0
@@ -20,12 +22,17 @@ public class BoundsOctreeNode<T> {
 	// Objects in this node
 	readonly List<OctreeObject> objects = new List<OctreeObject>();
 	// Child nodes, if any
-	BoundsOctreeNode<T>[] children = null;
+	BoundsOctreeNode<T>[] children;
 	// Bounds of potential children to this node. These are actual size (with looseness taken into account), not base size
 	Bounds[] childBounds;
 	// If there are already numObjectsAllowed in a node, we split it into children
 	// A generally good number seems to be something around 8-15
 	const int numObjectsAllowed = 8;
+
+    event Action<BoundsOctreeNode<T>> nodeCreated;
+    event Action<BoundsOctreeNode<T>, BoundsOctreeNode<T>[], BoundsOctreeNode<T>[]> childrenChanging;
+    event Action<BoundsOctreeNode<T>, T> objectAdded;
+    event Action<BoundsOctreeNode<T>, T> objectRemoved;
 
 	// An object in the octree
 	class OctreeObject {
@@ -40,8 +47,22 @@ public class BoundsOctreeNode<T> {
 	/// <param name="minSizeVal">Minimum size of nodes in this octree.</param>
 	/// <param name="loosenessVal">Multiplier for baseLengthVal to get the actual size.</param>
 	/// <param name="centerVal">Centre position of this node.</param>
-	public BoundsOctreeNode(float baseLengthVal, float minSizeVal, float loosenessVal, Vector3 centerVal) {
+	/// <param name="nodeCreatedCallback">[optional] Event raised when nodes are created (passed on to children, too).</param>
+	/// <param name="childrenChangingCallback">[optional] Event raised when children nodes are being changed.</param>
+	/// <param name="objectAdded">[optional] Event raised when objects are added to this node.</param>
+	/// <param name="objectRemoved">[optional] Event raised when objects are removed from this node.</param>
+	public BoundsOctreeNode(float baseLengthVal, float minSizeVal, float loosenessVal, Vector3 centerVal, 
+        Action<BoundsOctreeNode<T>> nodeCreatedCallback = null, Action<BoundsOctreeNode<T>, BoundsOctreeNode<T>[], BoundsOctreeNode<T>[]> childrenChangingCallback = null,
+        Action<BoundsOctreeNode<T>, T> objectAddedCallback = null, Action<BoundsOctreeNode<T>, T> objectRemovedCallback = null) {
 		SetValues(baseLengthVal, minSizeVal, loosenessVal, centerVal);
+
+	    nodeCreated = nodeCreatedCallback;
+	    childrenChanging = childrenChangingCallback;
+	    objectAdded = objectAddedCallback;
+	    objectRemoved = objectRemovedCallback;
+
+	    if (nodeCreated != null)
+	        nodeCreated(this);
 	}
 
 	// #### PUBLIC METHODS ####
@@ -70,7 +91,7 @@ public class BoundsOctreeNode<T> {
 
 		for (int i = 0; i < objects.Count; i++) {
 			if (objects[i].Obj.Equals(obj)) {
-				removed = objects.Remove(objects[i]);
+				removed = RemoveObject(objects[i]);
 				break;
 			}
 		}
@@ -215,12 +236,15 @@ public class BoundsOctreeNode<T> {
 	/// </summary>
 	/// <param name="childOctrees">The 8 new child nodes.</param>
 	public void SetChildren(BoundsOctreeNode<T>[] childOctrees) {
-		if (childOctrees.Length != 8) {
+		if (childOctrees != null && childOctrees.Length != 8) {
 			Debug.LogError("Child octree array must be length 8. Was length: " + childOctrees.Length);
 			return;
 		}
 
-		children = childOctrees;
+	    if (childrenChanging != null)
+            childrenChanging(this, children, childOctrees);
+
+	    children = childOctrees;
 	}
 
 	public Bounds GetBounds()
@@ -233,7 +257,11 @@ public class BoundsOctreeNode<T> {
 	/// Must be called from OnDrawGizmos externally. See also: DrawAllObjects.
 	/// </summary>
 	/// <param name="depth">Used for recurcive calls to this method.</param>
-	public void DrawAllBounds(float depth = 0) {
+	public void DrawAllBounds(float depth = 0)
+	{
+	    if (!HasAnyObjects())
+	        return;
+
 		float tintVal = depth / 7; // Will eventually get values > 1. Color rounds to 1 automatically
 		Gizmos.color = new Color(tintVal, 0, 1.0f - tintVal);
 
@@ -394,6 +422,30 @@ public class BoundsOctreeNode<T> {
 		childBounds[7] = new Bounds(Center + new Vector3(quarter, -quarter, quarter), childActualSize);
 	}
 
+    /// <summary>
+    /// Wrapper method for adding an object and raising an event
+    /// </summary>
+    /// <param name="object">OctreeObject to add</param>
+    void AddObject(OctreeObject @object)
+    {
+        objects.Add(@object);
+        if (objectAdded != null)
+            objectAdded(this, @object.Obj);
+    }
+
+    /// <summary>
+    /// Wrapper method for removing an object and raising an event
+    /// </summary>
+    /// <param name="object">OctreeObject to remove</param>
+    bool RemoveObject(OctreeObject @object)
+    {
+        var result = objects.Remove(@object);
+        if (result && objectRemoved != null)
+            objectRemoved(this, @object.Obj);
+
+        return result;
+    }
+
 	/// <summary>
 	/// Private counterpart to the public Add method.
 	/// </summary>
@@ -405,7 +457,7 @@ public class BoundsOctreeNode<T> {
 		if (objects.Count < numObjectsAllowed || (BaseLength / 2) < minSize) {
 			OctreeObject newObj = new OctreeObject { Obj = obj, Bounds = objBounds };
 			//Debug.Log("ADD " + obj.name + " to depth " + depth);
-			objects.Add(newObj);
+			AddObject(newObj);
 		}
 		else {
 			// Fits at this level, but we can go deeper. Would it fit there?
@@ -428,7 +480,7 @@ public class BoundsOctreeNode<T> {
 					// Does it fit?
 					if (Encapsulates(children[bestFitChild].bounds, existingObj.Bounds)) {
 						children[bestFitChild].SubAdd(existingObj.Obj, existingObj.Bounds); // Go a level deeper					
-						objects.Remove(existingObj); // Remove from here
+						RemoveObject(existingObj); // Remove from here
 					}
 				}
 			}
@@ -441,7 +493,7 @@ public class BoundsOctreeNode<T> {
 			else {
 				OctreeObject newObj = new OctreeObject { Obj = obj, Bounds = objBounds };
 				//Debug.Log("ADD " + obj.name + " to depth " + depth);
-				objects.Add(newObj);
+			    AddObject(newObj);
 			}
 		}
 	}
@@ -452,15 +504,16 @@ public class BoundsOctreeNode<T> {
 	void Split() {
 		float quarter = BaseLength / 4f;
 		float newLength = BaseLength / 2;
-		children = new BoundsOctreeNode<T>[8];
-		children[0] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(-quarter, quarter, -quarter));
-		children[1] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(quarter, quarter, -quarter));
-		children[2] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(-quarter, quarter, quarter));
-		children[3] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(quarter, quarter, quarter));
-		children[4] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(-quarter, -quarter, -quarter));
-		children[5] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(quarter, -quarter, -quarter));
-		children[6] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(-quarter, -quarter, quarter));
-		children[7] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(quarter, -quarter, quarter));
+		var children = new BoundsOctreeNode<T>[8];
+		children[0] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(-quarter, quarter, -quarter), nodeCreated, childrenChanging, objectAdded, objectRemoved);
+		children[1] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(quarter, quarter, -quarter), nodeCreated, childrenChanging, objectAdded, objectRemoved);
+		children[2] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(-quarter, quarter, quarter), nodeCreated, childrenChanging, objectAdded, objectRemoved);
+		children[3] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(quarter, quarter, quarter), nodeCreated, childrenChanging, objectAdded, objectRemoved);
+		children[4] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(-quarter, -quarter, -quarter), nodeCreated, childrenChanging, objectAdded, objectRemoved);
+		children[5] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(quarter, -quarter, -quarter), nodeCreated, childrenChanging, objectAdded, objectRemoved);
+		children[6] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(-quarter, -quarter, quarter), nodeCreated, childrenChanging, objectAdded, objectRemoved);
+		children[7] = new BoundsOctreeNode<T>(newLength, minSize, looseness, Center + new Vector3(quarter, -quarter, quarter), nodeCreated, childrenChanging, objectAdded, objectRemoved);
+        SetChildren(children);
 	}
 
 	/// <summary>
@@ -475,11 +528,11 @@ public class BoundsOctreeNode<T> {
 			int numObjects = curChild.objects.Count;
 			for (int j = numObjects - 1; j >= 0; j--) {
 				OctreeObject curObj = curChild.objects[j];
-				objects.Add(curObj);
+			    AddObject(curObj);
 			}
 		}
 		// Remove the child nodes (and the objects in them - they've been added elsewhere now)
-		children = null;
+		SetChildren(null);
 	}
 
 	/// <summary>
