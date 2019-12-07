@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using UnityEngine;
 
 // A Dynamic, Loose Octree for storing any objects that can be described with AABB bounds
